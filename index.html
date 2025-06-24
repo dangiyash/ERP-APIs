@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en" >
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Student Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <h1>Student Info Portal</h1>
+
+  <div id="login-section">
+    <h2>Login</h2>
+    <input id="roll" type="text" placeholder="Roll Number or Scholar Number" autocomplete="username" />
+    <input id="password" type="password" placeholder="Password" autocomplete="current-password" />
+    <button id="login-btn">Login</button>
+  </div>
+
+  <div id="dashboard">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+      <h2>Welcome, <span id="student-name"></span></h2>
+      <button id="logout-btn" style="max-width: 120px; margin-left: 20px;">Logout</button>
+    </div>
+    <div class="tabs">
+      <button class="tab-button active" data-tab="profile-tab">Profile</button>
+      <button class="tab-button" data-tab="semester-tab">Semester Info</button>
+      <button class="tab-button" data-tab="result-tab">Results</button>
+      <button class="tab-button" data-tab="fees-tab">Fees</button>
+    </div>
+
+    <div id="profile-tab" class="tab-content"></div>
+    <div id="semester-tab" class="tab-content" style="display:none;"></div>
+    <div id="result-tab" class="tab-content" style="display:none;"></div>
+    <div id="fees-tab" class="tab-content" style="display:none;"></div>
+  </div>
+
+<script>
+  let token = null;
+  let uid = null;
+  let programId = null;
+
+  async function login() {
+    const roll = document.getElementById('roll').value.trim();
+    const pass = document.getElementById('password').value;
+
+    if (!roll || !pass) {
+      alert("Please enter both username and password");
+      return;
+    }
+
+    try {
+      const res = await fetch("https://erpapi.manit.ac.in/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: roll, password: pass })
+      });
+
+      if (!res.ok) throw new Error(`Login failed (status: ${res.status})`);
+
+      const data = await res.json();
+      if (!data.token) throw new Error("Login failed: no token");
+
+      token = data.token;
+
+      // extract uid from JWT or fallback userInfo.uid
+      try {
+        const payload = JSON.parse(atob(token.split('.')[1]));
+        uid = payload.studentuid || null;
+      } catch {
+        uid = null;
+      }
+      if (!uid) uid = data.userInfo?.uid || null;
+      if (!uid) throw new Error("Could not extract student UID");
+
+      // Log the full userInfo object for debugging
+      console.log("Login userInfo:", data.userInfo);
+
+      // Robustly extract programId from all possible fields, including array case
+      programId = data.userInfo?.program_master_id
+               || data.userInfo?.program_id
+               || (Array.isArray(data.userInfo?.program) && data.userInfo.program[0]?.program_master_id)
+               || data.userInfo?.program
+               || data.userInfo?.programCode
+               || data.userInfo?.programcode
+               || null;
+      if (!programId) {
+        alert("Could not extract program ID from login. Please contact support.");
+        throw new Error("Could not extract program ID from login response");
+      }
+
+      // Set name
+      const name = data.userInfo?.cn || data.userInfo?.gecos || "Student";
+      document.getElementById("student-name").innerText = name;
+
+      // Hide login, show dashboard
+      document.getElementById("login-section").style.display = "none";
+      document.getElementById("dashboard").style.display = "block";
+
+      // Load dashboard data
+      await loadDashboard();
+
+    } catch (err) {
+      alert(err.message);
+      console.error(err);
+    }
+  }
+
+  async function api(endpoint, body = {}) {
+    try {
+      const res = await fetch(`https://erpapi.manit.ac.in/api/${endpoint}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify(body)
+      });
+
+      if (!res.ok) {
+        console.error(`API ${endpoint} failed with status: ${res.status}`);
+        // Try to get error details from response
+        try {
+          const errorData = await res.json();
+          console.error('Error details:', errorData);
+        } catch (e) {
+          console.error('No detailed error response available');
+        }
+        throw new Error(`API ${endpoint} failed (status: ${res.status})`);
+      }
+
+      const data = await res.json();
+      return data;
+    } catch (err) {
+      console.error(`API call to ${endpoint} failed:`, err);
+      throw err;
+    }
+  }
+
+  async function loadDashboard() {
+    try {
+      // Use extracted uid and programId from login
+      const profile = await api("student_profile_check", { studentuid: uid });
+      // Use programId from login, fallback to profile or 74
+      let effectiveProgramId = programId || profile?.program_master_id || 74;
+      console.log('Program ID:', effectiveProgramId);
+
+      // Fetch semester data
+      let semester;
+      try {
+        semester = await api("fetch_semester", { 
+          studentuid: uid, 
+          program: effectiveProgramId
+        });
+      } catch (err) {
+        console.error('First semester fetch attempt failed:', err);
+        // If first attempt fails, try with default program ID
+        if (effectiveProgramId !== 74) {
+          console.log('Retrying with default program ID (74)...');
+          try {
+            semester = await api("fetch_semester", { 
+              studentuid: uid, 
+              program: 74 
+            });
+          } catch (retryErr) {
+            console.error('Retry also failed:', retryErr);
+            throw new Error('Could not fetch semester data after retry');
+          }
+        } else {
+          throw err;
+        }
+      }
+
+      const result = await api("student_result", { studentuid: uid });
+      const fees = await api("check-fees-status", { studentuid: uid });
+
+      // Render profile nicely
+      const profileTab = document.getElementById("profile-tab");
+      profileTab.innerHTML = '';
+      profileTab.appendChild(renderProfile(profile));
+
+      // Render semester info with enhanced error handling
+      const semesterTab = document.getElementById("semester-tab");
+      semesterTab.innerHTML = '<h3 style="color:#00fff7; margin-top:0;">Semester Info</h3>';
+      
+      if (semester && typeof semester === 'object') {
+        const table = document.createElement('table');
+        const tbody = document.createElement('tbody');
+
+        // Helper function to safely get nested values
+        const safeGet = (obj, path) => {
+          if (!obj) return '-';
+          return path.split('.').reduce((acc, part) => {
+            if (acc === null || acc === undefined) return '-';
+            return acc[part] !== undefined ? acc[part] : '-';
+          }, obj);
+        };
+
+        // Common fields to display (expanded list for different branches)
+        const fields = [
+          { key: 'studentuid', label: 'Student UID' },
+          { key: 'semester_reg_completion_status', label: 'Registration Status' },
+          { key: 'semester_term_no_id_code', label: 'Semester Term' },
+          { key: 'code_desc', label: 'Semester Description' },
+          { key: 'registration', label: 'Registration Status' },
+          { key: 'program_master_id', label: 'Program ID' },
+          { key: 'dept_id', label: 'Department ID' },
+          { key: 'degree_level_id_code', label: 'Degree Level' },
+          { key: 'program_type_id_code', label: 'Program Type' },
+          { key: 'minorReg', label: 'Minor Registration' },
+          { key: 'start_session', label: 'Start Session' },
+          { key: 'curriculum_start_session', label: 'Curriculum Session' },
+          // Additional fields that might be present in CSE branch
+          { key: 'branch_name', label: 'Branch Name' },
+          { key: 'current_semester', label: 'Current Semester' },
+          { key: 'batch_year', label: 'Batch Year' },
+          { key: 'section', label: 'Section' }
+        ];
+
+        // First add common fields if they exist
+        fields.forEach(({ key, label }) => {
+          const value = safeGet(semester, key);
+          if (value !== '-' || key === 'studentuid') { // Always show studentuid even if empty
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td class="key">${label}</td>
+              <td class="value">${value}</td>
+            `;
+            tbody.appendChild(tr);
+          }
+        });
+
+        // Then add any additional fields not in our predefined list
+        Object.entries(semester).forEach(([key, value]) => {
+          if (!fields.some(f => f.key === key) && 
+              typeof value !== 'object' && 
+              value !== null && 
+              !Array.isArray(value)) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td class="key">${key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</td>
+              <td class="value">${value}</td>
+            `;
+            tbody.appendChild(tr);
+          }
+        });
+
+        table.appendChild(tbody);
+        semesterTab.appendChild(table);
+
+        if (Object.keys(semester).length === 0) {
+          const errorMsg = document.createElement('div');
+          errorMsg.className = 'error';
+          errorMsg.textContent = 'No semester data available for this branch';
+          semesterTab.appendChild(errorMsg);
+        }
+      } else {
+        const errorMsg = document.createElement('div');
+        errorMsg.className = 'error';
+        errorMsg.textContent = 'Failed to load semester data. Please try again.';
+        semesterTab.appendChild(errorMsg);
+      }
+
+      // Render results as styled tables
+      const resultTab = document.getElementById("result-tab");
+      resultTab.innerHTML = '<h3 style="color:#00fff7; margin-top:0;">Results</h3>';
+      if (result && result.status === "success" && result.data && Array.isArray(result.data.Semester_Data)) {
+        result.data.Semester_Data.forEach((sem, idx) => {
+          if (!sem.data) return;
+          // Semester heading
+          const semTitle = document.createElement('h4');
+          semTitle.textContent = `Semester ${idx + 1}`;
+          semTitle.style.color = '#39ff14';
+          semTitle.style.marginBottom = '8px';
+          resultTab.appendChild(semTitle);
+
+          // Subjects table
+          const table = document.createElement('table');
+          const thead = document.createElement('thead');
+          thead.innerHTML = `<tr><th>Subject</th><th>Code</th><th>Mid</th><th>End</th><th>Total</th><th>Grade</th><th>Credit</th></tr>`;
+          table.appendChild(thead);
+          const tbody = document.createElement('tbody');
+          sem.data.subjects.forEach(sub => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td>${sub.subname}</td>
+              <td>${sub.subject_code}</td>
+              <td>${sub.mid_term_marks}</td>
+              <td>${sub.end_term_marks}</td>
+              <td>${sub.marks_obtained}</td>
+              <td>${sub.grade}</td>
+              <td>${sub.credit}</td>
+            `;
+            tbody.appendChild(tr);
+          });
+          table.appendChild(tbody);
+          resultTab.appendChild(table);
+
+          // Grand total/summary table
+          if (sem.data.grand_total) {
+            const gt = sem.data.grand_total;
+            const summary = document.createElement('table');
+            summary.style.marginTop = '8px';
+            summary.innerHTML = `
+              <tr><td class="key">Total Marks</td><td class="value">${gt.total_marks}</td></tr>
+              <tr><td class="key">Marks Obtained</td><td class="value">${gt.marks_obtained}</td></tr>
+              <tr><td class="key">Percentage</td><td class="value">${gt.percentage}%</td></tr>
+              <tr><td class="key">SGPA</td><td class="value">${gt.sgpa}</td></tr>
+              <tr><td class="key">Credits</td><td class="value">${gt.total_credits}</td></tr>
+              <tr><td class="key">Division</td><td class="value">${gt.division}</td></tr>
+              <tr><td class="key">Result</td><td class="value">${gt.pass_or_fail}</td></tr>
+            `;
+            resultTab.appendChild(summary);
+          }
+        });
+        // CGPA Table
+        if (Array.isArray(result.data.FINAL_CGPA)) {
+          const cgpaTable = document.createElement('table');
+          cgpaTable.style.marginTop = '16px';
+          cgpaTable.innerHTML = `<thead><tr><th>Semester</th><th>CGPA</th></tr></thead><tbody>` +
+            result.data.FINAL_CGPA.map((cgpa, i) => `<tr><td>${i + 1}</td><td>${cgpa}</td></tr>`).join('') +
+            `</tbody>`;
+          resultTab.appendChild(document.createElement('hr'));
+          const cgpaTitle = document.createElement('h4');
+          cgpaTitle.textContent = 'Cumulative CGPA';
+          cgpaTitle.style.color = '#00fff7';
+          resultTab.appendChild(cgpaTitle);
+          resultTab.appendChild(cgpaTable);
+        }
+      } else {
+        resultTab.textContent = 'No results data available.';
+      }
+
+      // Render fees tab dynamically
+      const feesTab = document.getElementById("fees-tab");
+      feesTab.innerHTML = '<h3 style="color:#00fff7; margin-top:0;">Fees</h3>';
+      if (fees && typeof fees === 'object' && fees.message) {
+        const msgDiv = document.createElement('div');
+        msgDiv.textContent = fees.message;
+        msgDiv.className = 'alert';
+        msgDiv.style.marginTop = '20px';
+        msgDiv.style.fontSize = '1.2em';
+        msgDiv.style.textAlign = 'center';
+        feesTab.appendChild(msgDiv);
+      } else if (fees && typeof fees === 'object') {
+        feesTab.appendChild(renderProfile(fees));
+      } else {
+        feesTab.textContent = 'No fees data available.';
+      }
+
+    } catch (err) {
+      alert("Failed to load dashboard: " + err.message);
+      console.error(err);
+    }
+  }
+
+  // Render profile object as a table
+  function renderProfile(profile) {
+    const container = document.createElement('div');
+
+    const table = document.createElement('table');
+    for (const [key, value] of Object.entries(profile)) {
+      const tr = document.createElement('tr');
+
+      const tdKey = document.createElement('td');
+      tdKey.textContent = prettifyKey(key);
+      tdKey.className = 'key';
+
+      const tdVal = document.createElement('td');
+      tdVal.textContent = (value === null || value === '') ? '-' : value;
+      tdVal.className = 'value';
+
+      tr.appendChild(tdKey);
+      tr.appendChild(tdVal);
+      table.appendChild(tr);
+    }
+    container.appendChild(table);
+    return container;
+  }
+
+  // Human readable keys
+  function prettifyKey(key) {
+    return key
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  // Tab switching
+  document.querySelectorAll('.tab-button').forEach(button => {
+    button.addEventListener('click', () => {
+      document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(tc => tc.style.display = 'none');
+
+      button.classList.add('active');
+      document.getElementById(button.dataset.tab).style.display = 'block';
+    });
+  });
+
+  // Login button event
+  document.getElementById("login-btn").addEventListener('click', login);
+
+  document.getElementById("logout-btn").addEventListener('click', function() {
+    token = null;
+    uid = null;
+    document.getElementById("dashboard").style.display = "none";
+    document.getElementById("login-section").style.display = "block";
+    document.getElementById("roll").value = '';
+    document.getElementById("password").value = '';
+  });
+</script>
+  <script src="config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js"></script>
+  <script>
+    const supabase = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_KEY);
+  </script>
+</body>
+</html>
