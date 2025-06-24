@@ -35,4 +35,4 @@ All requests go to: `https://erpapi.manit.ac.in/api/`
 
 ---
 
-Made with ❤️, wit, and zero frameworks. If you have issues, take it up with the CORS gods.
+
