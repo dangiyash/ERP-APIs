@@ -1,3 +1,5 @@
+While going through the buzz I discovered that the ERP makers left the APIs to be accesible by anyone, so I used them.
+
 ## 🤡 Why Does This Even Work?
 
 Because the legendary MANIT devs left their APIs wide open to the world with CORS: `*`.Privacy? Security? Never heard of her.
