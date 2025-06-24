@@ -1,4 +1,4 @@
-While going through the buzz I discovered that the ERP makers left the APIs to be accesible by anyone, so I used them.
+While going through the buzz I discovered that the ERP makers left the APIs to be accesible by anyone, so I used them. and detailed them for you so you can also use them directly and easily.
 
 ## 🤡 Why Does This Even Work?
 
